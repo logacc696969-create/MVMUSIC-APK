@@ -1,0 +1,73 @@
+name: Build APK
+
+# Tự động chạy mỗi khi có người push code lên nhánh main,
+# hoặc bấm "Run workflow" thủ công trong tab Actions.
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Lấy code từ repo
+        uses: actions/checkout@v4
+
+      - name: Cài Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.0'
+          channel: 'stable'
+
+      - name: Tạo khung Android (nếu repo chưa có sẵn thư mục android/)
+        run: flutter create --platforms=android .
+
+      - name: Đảm bảo có quyền INTERNET + lưu trữ media (cho package gal) trong AndroidManifest.xml
+        # KHÔNG phụ thuộc việc `flutter create` có tự thêm các quyền này hay
+        # không (chưa kiểm chứng chắc chắn giữa các phiên bản Flutter) -
+        # tự kiểm tra và chèn nếu thiếu. Idempotent - chạy lại nhiều lần vẫn an toàn.
+        # READ_MEDIA_VIDEO: Android 13+ (API 33+) - quyền đọc thư viện video mới.
+        # WRITE_EXTERNAL_STORAGE maxSdkVersion=32: chỉ áp dụng Android 12 trở xuống,
+        # từ Android 13 quyền này bị bỏ qua nên không ảnh hưởng thiết bị mới.
+        run: |
+          MANIFEST=android/app/src/main/AndroidManifest.xml
+          if ! grep -q "android.permission.INTERNET" "$MANIFEST"; then
+            sed -i '/<manifest/a\    <uses-permission android:name="android.permission.INTERNET" />' "$MANIFEST"
+          fi
+          if ! grep -q "android.permission.READ_MEDIA_VIDEO" "$MANIFEST"; then
+            sed -i '/<manifest/a\    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />' "$MANIFEST"
+          fi
+          if ! grep -q "android.permission.WRITE_EXTERNAL_STORAGE" "$MANIFEST"; then
+            sed -i '/<manifest/a\    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="32" />' "$MANIFEST"
+          fi
+          echo "--- AndroidManifest.xml sau khi kiểm tra ---"
+          cat "$MANIFEST"
+
+      - name: Cho phép kết nối http:// KHÔNG mã hoá - CHỈ trong bản debug
+        # Workflow này chỉ build bản RELEASE (bước dưới) nên file debug-only
+        # này KHÔNG ảnh hưởng gì tới APK thực tế phân phối cho người dùng -
+        # release luôn giữ nguyên yêu cầu https/wss mặc định của Android, an
+        # toàn như cũ. File này chỉ có tác dụng nếu SAU NÀY có ai (dev, không
+        # phải người dùng cuối) chạy `flutter run` ở máy riêng để debug/test
+        # bằng địa chỉ http:// cục bộ (LAN) thay vì qua Cloudflare Tunnel.
+        run: |
+          mkdir -p android/app/src/debug
+          cat > android/app/src/debug/AndroidManifest.xml << 'MANIFEST_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application android:usesCleartextTraffic="true" />
+          </manifest>
+          MANIFEST_EOF
+
+      - name: Cài dependencies
+        run: flutter pub get
+
+      - name: Build file APK
+        run: flutter build apk --release
+
+      - name: Tải APK lên (xem ở tab Actions -> lần chạy này -> mục Artifacts)
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
