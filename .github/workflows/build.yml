@@ -21,7 +21,15 @@ jobs:
           channel: 'stable'
 
       - name: Tạo khung Android (nếu repo chưa có sẵn thư mục android/)
-        run: flutter create --platforms=android .
+        # QUAN TRỌNG: PHẢI chỉ định --project-name tường minh - nếu không,
+        # `flutter create .` tự suy tên gói Dart từ TÊN THƯ MỤC hiện tại
+        # (trên GitHub Actions = TÊN REPO, vd "MVMUSIC-APK") - tên repo GitHub
+        # KHÔNG bắt buộc theo quy tắc đặt tên gói Dart (chữ thường, gạch dưới,
+        # không ký tự hoa/gạch ngang) nên rất dễ lỗi "is not a valid Dart
+        # package name" nếu repo đặt tên khác quy tắc này (vd viết hoa, có
+        # dấu gạch ngang). Ép đúng tên khớp với `name:` trong pubspec.yaml để
+        # KHÔNG phụ thuộc vào tên repo người dùng đặt là gì.
+        run: flutter create --platforms=android --project-name ai_mv_generator .
 
       - name: Đảm bảo có quyền INTERNET + lưu trữ media (cho package gal) trong AndroidManifest.xml
         # KHÔNG phụ thuộc việc `flutter create` có tự thêm các quyền này hay
