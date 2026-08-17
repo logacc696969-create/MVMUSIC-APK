@@ -14,6 +14,53 @@ jobs:
       - name: Lấy code từ repo
         uses: actions/checkout@v4
 
+      - name: Tự giải nén file .zip trong repo (nếu người dùng upload thẳng .zip)
+        # MỚI - dành cho việc upload TỪ ĐIỆN THOẠI: giao diện chọn file trên
+        # trình duyệt/app điện thoại KHÔNG hỗ trợ chọn "cả 1 thư mục" đáng tin
+        # cậy (dễ bỏ sót file/thư mục con, đặc biệt thư mục ẩn như .github) -
+        # cách THỰC TẾ nhất trên điện thoại là upload THẲNG 1 file .zip duy
+        # nhất (kéo thả 1 file, không phải nhiều file/thư mục lồng nhau).
+        # Bước này tự tìm file .zip BẤT KỲ ở gốc repo và TỰ GIẢI NÉN ngay
+        # trên máy chủ GitHub Actions (môi trường Linux đầy đủ dòng lệnh,
+        # không bị giới hạn như file picker điện thoại) - người dùng KHÔNG
+        # cần tự giải nén/chọn từng file/thư mục con trên điện thoại nữa.
+        # An toàn khi chạy nhiều lần / khi repo ĐÃ có sẵn code giải nén tay
+        # (không có file .zip nào) - tự bỏ qua, không báo lỗi.
+        run: |
+          ZIP_FILE=$(find . -maxdepth 1 -iname "*.zip" | head -n 1)
+          if [ -n "$ZIP_FILE" ]; then
+            echo "Tìm thấy file zip: $ZIP_FILE - đang giải nén..."
+            unzip -o -q "$ZIP_FILE" -d .
+            echo "Đã giải nén xong. Nội dung thư mục gốc sau khi giải nén:"
+            ls -la
+          else
+            echo "Không tìm thấy file .zip nào ở gốc repo - bỏ qua bước này (có thể code đã ở dạng thư mục sẵn)."
+          fi
+
+      - name: Kiểm tra repo có ĐÚNG source code thật (không phải thiếu file)
+        # Chặn NGAY nếu lib/main.dart THẬT của app này không có trong repo
+        # (kể cả sau khi đã thử tự giải nén .zip ở bước trên) - thay vì để
+        # build "thành công" âm thầm ra app SAI (bước `flutter create` bên
+        # dưới sẽ tự điền 1 main.dart MẶC ĐỊNH - app đếm số demo của Flutter -
+        # nếu thấy lib/main.dart bị THIẾU, và build vẫn chạy trót lọt, ra APK
+        # trông "build xong" nhưng hoàn toàn không phải app AI MV Generator -
+        # đây CHÍNH XÁC là lỗi thật đã xảy ra 1 lần).
+        # Dùng đúng 1 dòng import ĐẶC TRƯNG chỉ có trong main.dart THẬT của
+        # app này (không có trong main.dart mặc định của flutter create) làm
+        # dấu hiệu nhận biết.
+        run: |
+          if [ ! -f lib/main.dart ]; then
+            echo "::error::lib/main.dart KHÔNG TỒN TẠI trong repo sau khi giải nén."
+            echo "::error::Kiểm tra lại: bạn đã upload đúng file .zip chưa bị hỏng/thiếu chưa?"
+            exit 1
+          fi
+          if ! grep -q "screens/home_screen.dart" lib/main.dart; then
+            echo "::error::lib/main.dart KHÔNG PHẢI file main.dart thật của app AI MV Generator"
+            echo "::error::(thiếu dòng import 'screens/home_screen.dart') - file .zip có thể bị hỏng/sai."
+            exit 1
+          fi
+          echo "OK - lib/main.dart đúng là file thật của app."
+
       - name: Cài Flutter
         uses: subosito/flutter-action@v2
         with:
@@ -30,6 +77,18 @@ jobs:
         # dấu gạch ngang). Ép đúng tên khớp với `name:` trong pubspec.yaml để
         # KHÔNG phụ thuộc vào tên repo người dùng đặt là gì.
         run: flutter create --platforms=android --project-name ai_mv_generator .
+
+      - name: Đổi tên hiển thị app thành "MVMUSIC"
+        # MỚI - `flutter create` mặc định đặt android:label trùng tên gói Dart
+        # ("ai_mv_generator") - đổi thành tên hiển thị mong muốn trên máy
+        # người dùng (tên gói Dart và tên HIỂN THỊ trên màn hình máy là 2 thứ
+        # khác nhau, đổi cái này không ảnh hưởng cái kia). sed thay THẲNG giá
+        # trị android:label trong thẻ <application>, không phụ thuộc giá trị
+        # gốc là gì (khớp theo pattern `android:label="..."` bất kỳ).
+        run: |
+          MANIFEST=android/app/src/main/AndroidManifest.xml
+          sed -i 's/android:label="[^"]*"/android:label="MVMUSIC"/' "$MANIFEST"
+          grep "android:label" "$MANIFEST"
 
       - name: Đảm bảo có quyền INTERNET + lưu trữ media (cho package gal) trong AndroidManifest.xml
         # KHÔNG phụ thuộc việc `flutter create` có tự thêm các quyền này hay
@@ -70,6 +129,12 @@ jobs:
 
       - name: Cài dependencies
         run: flutter pub get
+
+      - name: Sinh icon launcher từ assets/icon/
+        # MỚI - chạy `flutter_launcher_icons` (đã khai báo cấu hình trong
+        # pubspec.yaml) để tự sinh icon cho MỌI độ phân giải Android từ 2 ảnh
+        # gốc, GHI ĐÈ icon mặc định flutter tạo ra ở bước `flutter create`.
+        run: dart run flutter_launcher_icons
 
       - name: Build file APK
         run: flutter build apk --release
