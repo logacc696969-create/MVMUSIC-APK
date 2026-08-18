@@ -107,8 +107,15 @@ jobs:
         # READ_MEDIA_VIDEO: Android 13+ (API 33+) - quyền đọc thư viện video mới.
         # WRITE_EXTERNAL_STORAGE maxSdkVersion=32: chỉ áp dụng Android 12 trở xuống,
         # từ Android 13 quyền này bị bỏ qua nên không ảnh hưởng thiết bị mới.
-        # FOREGROUND_SERVICE* + <service>: cho package flutter_background_service -
-        # giữ tiến trình % cập nhật qua thông báo dù màn hình khoá / chuyển app khác.
+        # FOREGROUND_SERVICE* : cho package flutter_background_service - giữ
+        # tiến trình % cập nhật qua thông báo dù màn hình khoá / chuyển app khác.
+        # LƯU Ý: KHÔNG tự khai báo <service> ở đây - package
+        # flutter_background_service_android đã có SẴN AndroidManifest.xml
+        # riêng khai báo đúng <service> đó rồi (được Gradle tự MERGE vào app
+        # lúc build) - khai báo tay thêm 1 lần nữa ở đây từng gây lỗi
+        # "Manifest merger failed" (giá trị android:exported="false" của mình
+        # đụng độ với "true" plugin tự khai) - chỉ cần xin đủ quyền permission
+        # là đủ, không cần đụng vào thẻ <service>.
         # POST_NOTIFICATIONS: Android 13+ cần quyền này để HIỆN được thông báo đó
         # (app chưa xin quyền lúc chạy - có thể cần bấm cho phép thủ công trong
         # Cài đặt > Ứng dụng > MVMUSIC > Thông báo trên máy Android 13+ nếu không
@@ -132,9 +139,6 @@ jobs:
           fi
           if ! grep -q "android.permission.POST_NOTIFICATIONS" "$MANIFEST"; then
             sed -i '/<manifest/a\    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />' "$MANIFEST"
-          fi
-          if ! grep -q "flutter_background_service.BackgroundService" "$MANIFEST"; then
-            sed -i '/<\/application>/i\    <service android:name="id.flutter.flutter_background_service.BackgroundService" android:foregroundServiceType="dataSync" android:exported="false" android:enabled="true" />' "$MANIFEST"
           fi
           echo "--- AndroidManifest.xml sau khi kiểm tra ---"
           cat "$MANIFEST"
