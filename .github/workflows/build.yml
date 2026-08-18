@@ -64,8 +64,18 @@ jobs:
       - name: Cài Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.24.0'
           channel: 'stable'
+          # KHÔNG ghim flutter-version cố định nữa (từng ghim '3.24.0' - phát
+          # hành giữa 2024, đã CŨ ~2 năm so với thời điểm build thật). Đây
+          # CHÍNH LÀ nguyên nhân gốc của cả 1 CHUỖI lỗi tưởng như không liên
+          # quan (disk_space_plus/gal/http-flutter_svg version-solving-failed,
+          # rồi tới lỗi Gradle "Could not get unknown property 'flutter'" của
+          # gal 2.3.3) - package trên pub.dev cập nhật liên tục theo Flutter/
+          # AGP hiện hành, ghim SDK build quá cũ trong khi dependencies luôn
+          # là bản MỚI NHẤT tại thời điểm build → lệch pha ngày càng xa theo
+          # thời gian, càng để lâu càng nhiều lỗi kiểu này. Dùng đúng bản
+          # 'stable' hiện hành mỗi lần build loại bỏ tận gốc cả nhóm lỗi này,
+          # không phải vá từng package một mãi mãi.
 
       - name: Tạo khung Android (nếu repo chưa có sẵn thư mục android/)
         # QUAN TRỌNG: PHẢI chỉ định --project-name tường minh - nếu không,
@@ -97,6 +107,12 @@ jobs:
         # READ_MEDIA_VIDEO: Android 13+ (API 33+) - quyền đọc thư viện video mới.
         # WRITE_EXTERNAL_STORAGE maxSdkVersion=32: chỉ áp dụng Android 12 trở xuống,
         # từ Android 13 quyền này bị bỏ qua nên không ảnh hưởng thiết bị mới.
+        # FOREGROUND_SERVICE* + <service>: cho package flutter_background_service -
+        # giữ tiến trình % cập nhật qua thông báo dù màn hình khoá / chuyển app khác.
+        # POST_NOTIFICATIONS: Android 13+ cần quyền này để HIỆN được thông báo đó
+        # (app chưa xin quyền lúc chạy - có thể cần bấm cho phép thủ công trong
+        # Cài đặt > Ứng dụng > MVMUSIC > Thông báo trên máy Android 13+ nếu không
+        # tự hiện popup xin quyền).
         run: |
           MANIFEST=android/app/src/main/AndroidManifest.xml
           if ! grep -q "android.permission.INTERNET" "$MANIFEST"; then
@@ -107,6 +123,18 @@ jobs:
           fi
           if ! grep -q "android.permission.WRITE_EXTERNAL_STORAGE" "$MANIFEST"; then
             sed -i '/<manifest/a\    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="32" />' "$MANIFEST"
+          fi
+          if ! grep -q "android.permission.FOREGROUND_SERVICE\"" "$MANIFEST"; then
+            sed -i '/<manifest/a\    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />' "$MANIFEST"
+          fi
+          if ! grep -q "android.permission.FOREGROUND_SERVICE_DATA_SYNC" "$MANIFEST"; then
+            sed -i '/<manifest/a\    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />' "$MANIFEST"
+          fi
+          if ! grep -q "android.permission.POST_NOTIFICATIONS" "$MANIFEST"; then
+            sed -i '/<manifest/a\    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />' "$MANIFEST"
+          fi
+          if ! grep -q "flutter_background_service.BackgroundService" "$MANIFEST"; then
+            sed -i '/<\/application>/i\    <service android:name="id.flutter.flutter_background_service.BackgroundService" android:foregroundServiceType="dataSync" android:exported="false" android:enabled="true" />' "$MANIFEST"
           fi
           echo "--- AndroidManifest.xml sau khi kiểm tra ---"
           cat "$MANIFEST"
