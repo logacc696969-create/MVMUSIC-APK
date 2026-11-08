@@ -5,11 +5,44 @@ name: Build APK
 on:
   push:
     branches: [ main ]
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      dynamic_color:
+        description: 'Thử Dynamic Color (màu giao diện theo hình nền Android 12+) - THÊM gói dynamic_color, có thể lỗi phiên bản'
+        type: boolean
+        default: false
+      crashlytics:
+        description: 'Bật Firebase Crashlytics (báo crash tự động) - CẦN secret GOOGLE_SERVICES_JSON; THÊM gói firebase + plugin Gradle, có thể lỗi phiên bản'
+        type: boolean
+        default: false
 
 jobs:
   build:
+    # MỚI (mục 55) - CHẠY SONG SONG 2 BẢN FLUTTER thay vì ghim cứng 1 bản: (1) `stable` = bản mới nhất hiện hành (như trước nay); (2) `3.47.x` = bản vá mới nhất của
+    # dòng 3.47 (dòng mà tài liệu Flutter ghi là hiện hành tới tháng 11/2026). Lý do: Flutter 3.50 dự kiến ra THÁNG 11/2026 (lịch phát hành chính thức) và `stable` không ghim sẽ
+    # tự nhảy lên - nếu bản mới làm hỏng build thì bản `3.47.x` VẪN ra APK. Không ghim cứng (tiền lệ ghim '3.24.0' gây chuỗi lỗi, xem bước "Cài Flutter" bên dưới) - `3.47.x` là
+    # DÒNG hiện hành chứ không phải bản cũ 2 năm. CÁCH ĐỌC KẾT QUẢ: cả hai xanh -> tải `app-release-apk` (stable). Chỉ `stable` đỏ -> lỗi do phiên bản Flutter mới, dùng
+    # `app-release-apk-flutter-3.47.x`. Cả hai đỏ -> lỗi nằm ở code/cấu hình, gửi dòng lỗi (cùng một dòng ở cả hai log là dấu hiệu rõ nhất).
+    name: Build APK (Flutter ${{ matrix.label }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false # 1 bản đỏ KHÔNG được huỷ bản còn lại
+      matrix:
+        include:
+          - label: stable
+            flutter-version: ''
+            artifact: app-release-apk
+          - label: 3.47.x
+            flutter-version: 3.47.x
+            artifact: app-release-apk-flutter-3.47.x
+    # MỚI - tự huỷ job nếu chạy quá 15 phút. Bản build bình thường của app
+    # chỉ tốn khoảng 5-7 phút - nếu Gradle/Kotlin bị treo (lỗi xung đột
+    # version không ai sửa code mà vẫn xảy ra, vd Flutter Stable tự nâng cấp
+    # Gradle nội bộ), job sẽ chạy tới GIỚI HẠN 6 TIẾNG của GitHub Actions rồi
+    # mới tự dừng - vừa tốn hết phút build miễn phí của tài khoản, vừa không
+    # ai biết lỗi cho tới khi tự vào kiểm tra thủ công. 15 phút = gấp đôi thời
+    # gian build bình thường, đủ dư để không huỷ nhầm 1 lần build hơi chậm.
+    timeout-minutes: 15
     steps:
       - name: Lấy code từ repo
         uses: actions/checkout@v4
@@ -65,6 +98,9 @@ jobs:
         uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
+          # MỚI (mục 55) - `flutter-version` lấy từ ma trận ở đầu job: để TRỐNG = bản stable mới nhất; '3.47.x' = bản vá mới nhất của dòng 3.47 (subosito/flutter-action hỗ trợ
+          # cú pháp 'X.Y.x'). Đây KHÔNG phải ghim cứng 1 bản cũ - xem chú thích ở đầu job.
+          flutter-version: ${{ matrix.flutter-version }}
           # KHÔNG ghim flutter-version cố định nữa (từng ghim '3.24.0' - phát
           # hành giữa 2024, đã CŨ ~2 năm so với thời điểm build thật). Đây
           # CHÍNH LÀ nguyên nhân gốc của cả 1 CHUỖI lỗi tưởng như không liên
@@ -76,6 +112,17 @@ jobs:
           # thời gian, càng để lâu càng nhiều lỗi kiểu này. Dùng đúng bản
           # 'stable' hiện hành mỗi lần build loại bỏ tận gốc cả nhóm lỗi này,
           # không phải vá từng package một mãi mãi.
+
+      - name: Ghi phiên bản Flutter/Dart của lần build này vào trang tóm tắt
+        # MỚI (mục 55) - để nhìn trang tóm tắt là biết ngay mỗi bản đỏ/xanh ứng với phiên bản Flutter nào (không phải mở log).
+        run: |
+          {
+            echo "### Flutter của lần build này: ${{ matrix.label }}"
+            echo '```'
+            flutter --version
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          flutter --version
 
       - name: Tạo khung Android (nếu repo chưa có sẵn thư mục android/)
         # QUAN TRỌNG: PHẢI chỉ định --project-name tường minh - nếu không,
@@ -120,6 +167,14 @@ jobs:
         # (app chưa xin quyền lúc chạy - có thể cần bấm cho phép thủ công trong
         # Cài đặt > Ứng dụng > MVMUSIC > Thông báo trên máy Android 13+ nếu không
         # tự hiện popup xin quyền).
+        # REQUEST_IGNORE_BATTERY_OPTIMIZATIONS: MỚI - cần khai báo quyền này (dù
+        # là "normal permission", tự động cấp không cần người dùng duyệt) để app
+        # được PHÉP hiển thị popup xin miễn trừ tối ưu hoá pin (xem
+        # generating_screen.dart _requestIgnoreBatteryOptimizations) - thiếu khai
+        # báo này thì gọi Intent đó sẽ bị hệ thống từ chối âm thầm. LƯU Ý nếu sau
+        # này bạn đăng app lên Google Play: đây là quyền "nhạy cảm", Play Console
+        # yêu cầu giải trình lý do sử dụng - không ảnh hưởng gì khi chỉ cài APK
+        # thủ công (sideload) như hiện tại.
         run: |
           MANIFEST=android/app/src/main/AndroidManifest.xml
           if ! grep -q "android.permission.INTERNET" "$MANIFEST"; then
@@ -140,8 +195,24 @@ jobs:
           if ! grep -q "android.permission.POST_NOTIFICATIONS" "$MANIFEST"; then
             sed -i '/<manifest/a\    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />' "$MANIFEST"
           fi
+          if ! grep -q "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" "$MANIFEST"; then
+            sed -i '/<manifest/a\    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />' "$MANIFEST"
+          fi
           echo "--- AndroidManifest.xml sau khi kiểm tra ---"
           cat "$MANIFEST"
+
+      - name: Bật Predictive Back (Android 13+) trong AndroidManifest.xml
+        # MỚI (mục 23) - cờ `android:enableOnBackInvokedCallback="true"` trên thẻ <application> để
+        # hệ thống cho phép cử chỉ "vuốt quay lại có xem trước" (kết hợp PredictiveBackPageTransitionsBuilder
+        # khai trong main.dart). Idempotent: bỏ qua nếu manifest đã có sẵn cờ này. Thẻ <application> của
+        # `flutter create` trải trên nhiều dòng - sed chỉ chèn thuộc tính ngay sau chữ "<application" nên
+        # vẫn là XML hợp lệ.
+        run: |
+          MANIFEST=android/app/src/main/AndroidManifest.xml
+          if ! grep -q "enableOnBackInvokedCallback" "$MANIFEST"; then
+            sed -i 's/<application/<application android:enableOnBackInvokedCallback="true"/' "$MANIFEST"
+          fi
+          grep -c "enableOnBackInvokedCallback" "$MANIFEST"
 
       - name: Cho phép kết nối http:// KHÔNG mã hoá - CHỈ trong bản debug
         # Workflow này chỉ build bản RELEASE (bước dưới) nên file debug-only
@@ -159,8 +230,92 @@ jobs:
           </manifest>
           MANIFEST_EOF
 
+      - name: (TUỲ CHỌN) Bật Dynamic Color theo hình nền - CHỈ khi chạy thủ công và tích chọn
+        # MỚI (mục 24). Mặc định BỎ QUA (push lên main / không tích chọn) nên build thường KHÔNG bị ảnh hưởng.
+        # Khi bật: `flutter pub add` lấy bản dynamic_color TƯƠNG THÍCH với Flutter của lần build này (không ghim
+        # cứng, vì gói đã có bản 2.x chuyển sang material_ui), rồi chép bản theme Dynamic Color đè lên
+        # lib/app_theme.dart. Nếu bước này lỗi nghĩa là gói chưa hợp với Flutter stable hiện tại - bỏ tích chọn
+        # và build lại là về bình thường.
+        if: ${{ github.event.inputs.dynamic_color == 'true' }}
+        run: |
+          flutter pub add dynamic_color
+          cp tools/app_theme_dynamic.dart.txt lib/app_theme.dart
+          echo "Đã bật Dynamic Color: $(grep -c dynamic_color pubspec.yaml) dòng trong pubspec.yaml"
+
+      - name: (TUỲ CHỌN) Bật Firebase Crashlytics - CHỈ khi chạy thủ công và tích chọn `crashlytics`
+        # MỚI (mục 27). Mặc định BỎ QUA (push lên main / không tích chọn) nên build thường KHÔNG bị ảnh hưởng - lib/crashlytics_support.dart mặc định là bản RỖNG.
+        # Khi bật: (1) tools/enable_crashlytics.py ghi secret GOOGLE_SERVICES_JSON thành android/app/google-services.json và thêm 2 plugin Gradle
+        # (com.google.gms.google-services, com.google.firebase.crashlytics) vào settings.gradle(.kts) + app/build.gradle(.kts) theo Plugin DSL;
+        # (2) `flutter pub add` 2 gói firebase_core + firebase_crashlytics (bản tương thích với Flutter của lần build này); (3) chép bản Dart thật đè bản rỗng.
+        # CHƯA chạy thật. Nếu bước này lỗi: bỏ tích chọn và build lại là về bình thường (lỗi Dart vẫn được ghi vào CrashLog / Sentry nếu có).
+        if: ${{ github.event.inputs.crashlytics == 'true' }}
+        env:
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          python3 tools/enable_crashlytics.py android
+          flutter pub add firebase_core firebase_crashlytics
+          cp tools/crashlytics_support.dart.txt lib/crashlytics_support.dart
+          echo "Đã bật Crashlytics."
+
       - name: Cài dependencies
         run: flutter pub get
+
+      # MỚI (mục 23) - phân tích tĩnh + test Flutter, nhưng KHÔNG ĐƯỢC chặn việc ra APK:
+      # code Flutter của dự án chưa từng được `flutter analyze` ở môi trường viết code (không có Dart
+      # SDK), nên có thể có cảnh báo/lỗi lint đã tồn tại từ trước - `continue-on-error: true` để chúng
+      # HIỆN trong log (dấu X ở bước này) mà không làm hỏng cả lần build. Khi đã sạch, có thể bỏ
+      # `continue-on-error` để biến thành cổng chặn thật.
+      - name: Phân tích tĩnh (flutter analyze) - KHÔNG chặn build
+        continue-on-error: true
+        run: |
+          # MỚI (mục 35): ghi kết quả ra analyze.txt để bước kế tiếp đưa các dòng LỖI lên trang tóm tắt của lần build
+          # (Dart của dự án chưa từng được biên dịch ở môi trường viết code - đây là chỗ đầu tiên lỗi biên dịch lộ ra).
+          set -o pipefail
+          flutter analyze --no-fatal-infos --no-fatal-warnings 2>&1 | tee analyze.txt
+
+      - name: Tóm tắt lỗi flutter analyze (hiện ở trang tóm tắt của lần build)
+        if: always()
+        run: |
+          {
+            echo "### flutter analyze - các dòng LỖI (error)"
+            if [ -f analyze.txt ] && grep -E "^[[:space:]]*error " analyze.txt >/dev/null 2>&1; then
+              echo '```'
+              grep -E "^[[:space:]]*error " analyze.txt | head -60
+              echo '```'
+              echo "Sửa các lỗi trên trước (mỗi dòng ghi file:dòng:cột). Cảnh báo/gợi ý (warning/info) không chặn build."
+            else
+              echo "Không có lỗi biên dịch nào được flutter analyze báo."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Chạy test Flutter (thư mục test/) - KHÔNG chặn build
+        continue-on-error: true
+        run: |
+          # `flutter create` tự thêm test/widget_test.dart mặc định (đếm số demo, gọi MyApp) - luôn
+          # hỏng với app này, nên xoá nếu đúng là file mặc định đó.
+          if [ -f test/widget_test.dart ] && grep -q "MyApp" test/widget_test.dart; then
+            rm test/widget_test.dart
+          fi
+          if [ -d test ] && ls test/*.dart >/dev/null 2>&1; then
+            flutter test
+          else
+            echo "Không có file test nào trong test/ - bỏ qua."
+          fi
+
+      # MỚI - "R8 Native Shrinker" full-mode: yêu cầu chính thức của Google
+      # (android.enableR8.fullMode=true trong gradle.properties) để trình
+      # biên dịch phân tích TOÀN BỘ codebase (kể cả các thư viện bên thứ 3
+      # như flutter_background_service, audioplayers, video_player) và xoá
+      # vĩnh viễn hàm/biến "chết" không bao giờ được gọi tới - giảm dung
+      # lượng APK release, KHÔNG ảnh hưởng bản debug (chỉ áp dụng khi build
+      # --release ở bước dưới). Cần đúng 1 file proguard-rules.pro tối thiểu
+      # (rỗng là hợp lệ, Flutter/AGP tự có rule mặc định riêng cho Flutter
+      # Embedding) để R8 không xoá nhầm code Flutter Engine gọi qua JNI.
+      - name: Bật R8 full-mode shrinker (giảm dung lượng APK release)
+        run: |
+          echo "android.enableR8.fullMode=true" >> android/gradle.properties
+          touch android/app/proguard-rules.pro
+          grep -q "proguard-rules.pro" android/app/build.gradle && echo "proguard-rules.pro đã được build.gradle tham chiếu (mặc định của flutter create)." || echo "::warning::build.gradle không thấy tham chiếu proguard-rules.pro - R8 vẫn chạy nhưng có thể không áp dụng rule tuỳ chỉnh nào (chấp nhận được vì file đang để rỗng)."
 
       - name: Sinh icon launcher từ assets/icon/
         # MỚI - chạy `flutter_launcher_icons` (đã khai báo cấu hình trong
@@ -174,5 +329,5 @@ jobs:
       - name: Tải APK lên (xem ở tab Actions -> lần chạy này -> mục Artifacts)
         uses: actions/upload-artifact@v4
         with:
-          name: app-release-apk
+          name: ${{ matrix.artifact }}
           path: build/app/outputs/flutter-apk/app-release.apk
