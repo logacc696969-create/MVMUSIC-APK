@@ -42,7 +42,8 @@ jobs:
     # mới tự dừng - vừa tốn hết phút build miễn phí của tài khoản, vừa không
     # ai biết lỗi cho tới khi tự vào kiểm tra thủ công. 15 phút = gấp đôi thời
     # gian build bình thường, đủ dư để không huỷ nhầm 1 lần build hơi chậm.
-    timeout-minutes: 15
+    # MỚI (mục 59) - 25 phút: khi cầu nối Kotlin làm build lỗi, job build LẠI một lần không có cầu nối (xem bước dự phòng sau "Build file APK") nên cần dư cho 2 lần build.
+    timeout-minutes: 25
     steps:
       - name: Lấy code từ repo
         uses: actions/checkout@v4
@@ -115,14 +116,34 @@ jobs:
 
       - name: Ghi phiên bản Flutter/Dart của lần build này vào trang tóm tắt
         # MỚI (mục 55) - để nhìn trang tóm tắt là biết ngay mỗi bản đỏ/xanh ứng với phiên bản Flutter nào (không phải mở log).
+        # MỚI (mục 59) - thêm ENGINE REVISION (mã engine của Flutter lần build này): cần để tải đúng ký hiệu `symbols.zip` giải mã tên hàm của libflutter.so trong báo cáo crash native
+        # (tài liệu Flutter "Symbolicating stack traces for engine crashes": bin/internal/engine.version chứa mã này; dự phòng `flutter --version --machine`).
         run: |
+          FLUTTER_BIN="$(readlink -f "$(command -v flutter)")"
+          ENGINE=""
+          if [ -f "$(dirname "$(dirname "$FLUTTER_BIN")")/bin/internal/engine.version" ]; then
+            ENGINE="$(tr -d '[:space:]' < "$(dirname "$(dirname "$FLUTTER_BIN")")/bin/internal/engine.version")"
+          fi
+          if [ -z "$ENGINE" ]; then
+            ENGINE="$(flutter --version --machine 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin).get("engineRevision",""))' 2>/dev/null || true)"
+          fi
           {
             echo "### Flutter của lần build này: ${{ matrix.label }}"
             echo '```'
             flutter --version
             echo '```'
+            if [ -n "$ENGINE" ]; then
+              echo "**Engine revision:** \`$ENGINE\` (để giải mã tên hàm trong báo cáo crash native của libflutter.so)"
+              echo "- arm64: https://storage.googleapis.com/flutter_infra_release/flutter/$ENGINE/android-arm64-release/symbols.zip"
+              echo "- arm: https://storage.googleapis.com/flutter_infra_release/flutter/$ENGINE/android-arm-release/symbols.zip"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
           flutter --version
+          echo "Engine revision: ${ENGINE:-<không xác định>}"
+          # MỚI (mục 60) - chuyển mã engine cho các bước sau: `flutter build apk --dart-define=MV_ENGINE_REV=...` nhúng nó vào app để báo cáo crash tự ghi đúng mã engine
+          if [ -n "$ENGINE" ] && [ -n "${GITHUB_ENV:-}" ]; then
+            echo "MV_ENGINE_REV=$ENGINE" >> "$GITHUB_ENV"
+          fi
 
       - name: Tạo khung Android (nếu repo chưa có sẵn thư mục android/)
         # QUAN TRỌNG: PHẢI chỉ định --project-name tường minh - nếu không,
@@ -230,6 +251,57 @@ jobs:
           </manifest>
           MANIFEST_EOF
 
+      - name: Thêm cầu nối "lý do app bị tắt" (ApplicationExitInfo) vào MainActivity - TỰ ĐỘNG, không cần tài khoản nào
+        id: bridge
+        # MỚI (mục 57) - thay cho Firebase Crashlytics ở 2 điểm Crashlytics hơn: crash NATIVE/ANR/bị Android giết và crash lúc khởi động. Android 11+ tự lưu lý do tiến trình app lần
+        # trước chết; `tools/MainActivity.kt.txt` (Kotlin ~60 dòng, dùng `ActivityManager.getHistoricalProcessExitReasons`) đọc lại nó ở lần mở app kế tiếp, `lib/exit_info.dart` ghi vào
+        # CrashLog rồi `CrashSync` tự gửi về backend. AN TOÀN: chỉ chép đè khi tìm ĐÚNG 1 file `MainActivity.kt` còn nguyên bản `flutter create` (chưa có configureFlutterEngine);
+        # ngược lại BỎ QUA kèm cảnh báo - APK vẫn build, tính năng chỉ không hoạt động. CHƯA biên dịch Kotlin thật: nếu bước Gradle sau đó đỏ và dòng lỗi nhắc `MainActivity.kt`
+        # thì gửi dòng lỗi cho mình (mình sẽ xoá bước này ngay).
+        # MỚI (mục 59) - TỰ PHÒNG HỘ: bước này sao lưu MainActivity.kt gốc (`.mv-orig`) và ghi output `applied`/`path`; nếu bước "Build file APK" bên dưới LỖI trong khi cầu nối đang bật
+        # thì bước dự phòng ngay sau nó TỰ gỡ cầu nối và build lại - APK không bao giờ bị mã Kotlin chưa biên dịch chặn.
+        run: |
+          python3 - <<'PY'
+          import glob, os, re, shutil, sys
+          template = open("tools/MainActivity.kt.txt", encoding="utf-8").read()
+          found = glob.glob("android/app/src/main/**/MainActivity.kt", recursive=True)
+          def skip(reason):
+              print("::warning title=Cầu nối lý do thoát BỎ QUA::" + reason + " - APK vẫn build bình thường, chỉ thiếu tính năng ghi lý do app bị tắt.")
+              sys.exit(0)
+          if len(found) != 1:
+              skip("Không tìm đúng 1 file MainActivity.kt (thấy %d)" % len(found))
+          path = found[0]
+          source = open(path, encoding="utf-8").read()
+          pkg = re.search(r"^package\s+([\w.]+)\s*$", source, re.M)
+          if not pkg:
+              skip("MainActivity.kt không có dòng package hợp lệ")
+          if "configureFlutterEngine" in source:
+              skip("MainActivity.kt đã được tuỳ biến (có configureFlutterEngine) nên không ghi đè")
+          shutil.copyfile(path, path + ".mv-orig")  # bản gốc để gỡ cầu nối nếu build lỗi (file .mv-orig không được Gradle biên dịch)
+          open(path, "w", encoding="utf-8").write(template.replace("__PACKAGE__", pkg.group(1)))
+          print("Đã thêm cầu nối ApplicationExitInfo vào " + path + " (package " + pkg.group(1) + ")")
+          # MỚI (mục 60) - thêm xCrash (MIT, Maven Central) vào app/build.gradle(.kts): bắt crash NATIVE/ANR/Java kèm backtrace có tên hàm cho Android 4.1-11 (nơi ApplicationExitInfo
+          # không trả tombstone). Kotlin khởi tạo nó bằng reflection nên thiếu dòng này vẫn biên dịch; build lỗi vì nó thì bước dự phòng bên dưới gỡ cả hai.
+          gradle_applied = ""
+          for candidate in ("android/app/build.gradle.kts", "android/app/build.gradle"):
+              if os.path.exists(candidate):
+                  gsrc = open(candidate, encoding="utf-8").read()
+                  if "com.iqiyi.xcrash" not in gsrc:
+                      shutil.copyfile(candidate, candidate + ".mv-orig")
+                      dep = 'implementation("com.iqiyi.xcrash:xcrash-android-lib:3.0.0")' if candidate.endswith(".kts") else "implementation 'com.iqiyi.xcrash:xcrash-android-lib:3.0.0'"
+                      with open(candidate, "a", encoding="utf-8") as fh:
+                          fh.write("\n// MỚI (mục 60) - xCrash (MIT): bắt crash native/ANR cho Android 4.1-11; Kotlin khởi tạo bằng reflection\ndependencies {\n    " + dep + "\n}\n")
+                      gradle_applied = candidate
+                      print("Đã thêm phụ thuộc xCrash vào " + candidate)
+                  break
+          out = os.environ.get("GITHUB_OUTPUT")
+          if out:
+              with open(out, "a", encoding="utf-8") as fh:
+                  fh.write("applied=true\npath=" + path + "\n")
+                  if gradle_applied:
+                      fh.write("gradle_path=" + gradle_applied + "\n")
+          PY
+
       - name: (TUỲ CHỌN) Bật Dynamic Color theo hình nền - CHỈ khi chạy thủ công và tích chọn
         # MỚI (mục 24). Mặc định BỎ QUA (push lên main / không tích chọn) nên build thường KHÔNG bị ảnh hưởng.
         # Khi bật: `flutter pub add` lấy bản dynamic_color TƯƠNG THÍCH với Flutter của lần build này (không ghim
@@ -248,10 +320,18 @@ jobs:
         # (com.google.gms.google-services, com.google.firebase.crashlytics) vào settings.gradle(.kts) + app/build.gradle(.kts) theo Plugin DSL;
         # (2) `flutter pub add` 2 gói firebase_core + firebase_crashlytics (bản tương thích với Flutter của lần build này); (3) chép bản Dart thật đè bản rỗng.
         # CHƯA chạy thật. Nếu bước này lỗi: bỏ tích chọn và build lại là về bình thường (lỗi Dart vẫn được ghi vào CrashLog / Sentry nếu có).
+        # MỚI (mục 56) - THIẾU SECRET KHÔNG CÒN LÀM HỎNG BUILD: trước đây tích `crashlytics` mà chưa có GOOGLE_SERVICES_JSON thì build đỏ (lượt #85). Nay bước này tự BỎ QUA kèm
+        # cảnh báo và APK vẫn build bình thường. Tra cứu: Firebase CLI tạo được dự án + lấy google-services.json bằng lệnh nhưng bước ĐĂNG NHẬP Google thì không tự động được,
+        # nên thay vào đó app TỰ gửi nhật ký lỗi về backend của bạn (xem lib/crash_sync.dart) - không cần tài khoản nào.
         if: ${{ github.event.inputs.crashlytics == 'true' }}
         env:
           GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
         run: |
+          if [ -z "$(printf '%s' "$GOOGLE_SERVICES_JSON" | tr -d '[:space:]')" ]; then
+            echo "::warning title=Crashlytics bị BỎ QUA::Chưa có secret GOOGLE_SERVICES_JSON nên bước Crashlytics được bỏ qua. APK vẫn build bình thường. App đã tự gửi nhật ký lỗi về backend của bạn (thư mục crash_reports trên Drive) nên không cần Crashlytics."
+            echo "### Crashlytics: BỎ QUA (chưa có secret GOOGLE_SERVICES_JSON) - APK vẫn build bình thường" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           python3 tools/enable_crashlytics.py android
           flutter pub add firebase_core firebase_crashlytics
           cp tools/crashlytics_support.dart.txt lib/crashlytics_support.dart
@@ -324,7 +404,25 @@ jobs:
         run: dart run flutter_launcher_icons
 
       - name: Build file APK
-        run: flutter build apk --release
+        id: build
+        # MỚI (mục 59) - khi cầu nối Kotlin đang bật, build lỗi KHÔNG làm đỏ job ngay mà để bước dự phòng bên dưới thử lại KHÔNG có cầu nối (lỗi thật của code/cấu hình thì lần thử lại
+        # cũng lỗi và job vẫn đỏ đúng như trước). Khi cầu nối không bật thì hành vi y như cũ (lỗi là đỏ).
+        continue-on-error: ${{ steps.bridge.outputs.applied == 'true' }}
+        run: flutter build apk --release --dart-define=MV_ENGINE_REV="${MV_ENGINE_REV:-}"
+
+      - name: Cầu nối Kotlin làm hỏng build -> TỰ GỠ cầu nối và build lại
+        if: ${{ steps.bridge.outputs.applied == 'true' && steps.build.outcome == 'failure' }}
+        env:
+          BRIDGE_PATH: ${{ steps.bridge.outputs.path }}
+          GRADLE_PATH: ${{ steps.bridge.outputs.gradle_path }}
+        run: |
+          echo "::warning title=Cầu nối Kotlin/xCrash bị GỠ::Bản có cầu nối ApplicationExitInfo (và phụ thuộc xCrash) build lỗi nên đã tự gỡ chúng và build lại. APK vẫn ra nhưng KHÔNG có tính năng ghi lý do app bị tắt. Gửi mình dòng lỗi Kotlin/Gradle của bước 'Build file APK' phía trên."
+          echo "### Cầu nối Kotlin (ApplicationExitInfo) và xCrash bị GỠ: bản có chúng build lỗi, đã build lại không có" >> "$GITHUB_STEP_SUMMARY"
+          mv -f "$BRIDGE_PATH.mv-orig" "$BRIDGE_PATH"
+          if [ -n "$GRADLE_PATH" ] && [ -f "$GRADLE_PATH.mv-orig" ]; then
+            mv -f "$GRADLE_PATH.mv-orig" "$GRADLE_PATH"
+          fi
+          flutter build apk --release --dart-define=MV_ENGINE_REV="${MV_ENGINE_REV:-}"
 
       - name: Tải APK lên (xem ở tab Actions -> lần chạy này -> mục Artifacts)
         uses: actions/upload-artifact@v4
