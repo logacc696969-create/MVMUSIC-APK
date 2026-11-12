@@ -408,7 +408,32 @@ jobs:
         # MỚI (mục 59) - khi cầu nối Kotlin đang bật, build lỗi KHÔNG làm đỏ job ngay mà để bước dự phòng bên dưới thử lại KHÔNG có cầu nối (lỗi thật của code/cấu hình thì lần thử lại
         # cũng lỗi và job vẫn đỏ đúng như trước). Khi cầu nối không bật thì hành vi y như cũ (lỗi là đỏ).
         continue-on-error: ${{ steps.bridge.outputs.applied == 'true' }}
-        run: flutter build apk --release --dart-define=MV_ENGINE_REV="${MV_ENGINE_REV:-}"
+        # MỚI (mục 65) - ghi log lần build đầu ra tệp để bước "Phân loại lỗi build" bên dưới phân biệt LỖI DART với lỗi Kotlin/Gradle (trước đây MỌI lỗi đều bị đổ cho cầu nối Kotlin).
+        run: |
+          set -o pipefail
+          flutter build apk --release --dart-define=MV_ENGINE_REV="${MV_ENGINE_REV:-}" 2>&1 | tee "$RUNNER_TEMP/build1.log"
+
+      - name: Phân loại lỗi build (LỖI DART khác lỗi cầu nối Kotlin)
+        id: classify
+        if: ${{ always() && steps.build.outcome == 'failure' }}
+        # MỚI (mục 65) - build thật từng đỏ vì lỗi Dart ở lib/app_theme.dart (kiểu ColorScheme của dynamic_color 2.x) nhưng cảnh báo hiện ra lại nói "cầu nối Kotlin bị gỡ" vì bước dự phòng
+        # kích hoạt cho MỌI lỗi. Nay: thấy lỗi biên dịch Dart (kernel_snapshot / `lib/...dart:L:C: Error:`) -> ghi đúng dòng lỗi lên Annotations + trang tóm tắt, KHÔNG thử build lại, đỏ ngay.
+        run: |
+          LOG="$RUNNER_TEMP/build1.log"
+          if grep -qE "Target kernel_snapshot[A-Za-z_]* failed|^lib/[^ ]+\.dart:[0-9]+:[0-9]+: Error:" "$LOG"; then
+            echo "dart_error=true" >> "$GITHUB_OUTPUT"
+            FIRST=$(grep -m1 -E "^lib/[^ ]+\.dart:[0-9]+:[0-9]+: Error:" "$LOG" | cut -c1-300 || true)
+            echo "::error title=LỖI BIÊN DỊCH DART (không phải cầu nối Kotlin)::${FIRST:-xem bước Build file APK}"
+            {
+              echo "### LỖI BIÊN DỊCH DART - cầu nối Kotlin KHÔNG liên quan, đã KHÔNG build lại"
+              echo "Gửi nguyên dòng lỗi dưới đây:"
+              echo '```'
+              grep -E -A4 "^lib/[^ ]+\.dart:[0-9]+:[0-9]+: Error:" "$LOG" | head -60
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "dart_error=false" >> "$GITHUB_OUTPUT"
 
       - name: Cầu nối Kotlin làm hỏng build -> TỰ GỠ cầu nối và build lại
         if: ${{ steps.bridge.outputs.applied == 'true' && steps.build.outcome == 'failure' }}
