@@ -367,6 +367,13 @@ jobs:
               echo "Không có lỗi biên dịch nào được flutter analyze báo."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+          # MỚI (mục 66) - đưa chính các dòng lỗi vào khung Annotations (nơi dễ chụp màn hình nhất) thay vì chỉ "Process completed with exit code 1."
+          # (đặt NGOÀI khối `{ ... } >> $GITHUB_STEP_SUMMARY`: dòng ::error phải ra stdout thì GitHub mới tạo Annotation)
+          if [ -f analyze.txt ] && grep -qE "^[[:space:]]*error " analyze.txt; then
+            N=$(grep -cE "^[[:space:]]*error " analyze.txt || true)
+            FIRST=$(grep -E "^[[:space:]]*error " analyze.txt | head -6 | sed -E 's/^[[:space:]]*//' | cut -c1-230 | paste -sd '|' - || true)
+            echo "::error title=flutter analyze báo ${N} LỖI (APK vẫn build được)::${FIRST}"
+          fi
 
       - name: Chạy test Flutter (thư mục test/) - KHÔNG chặn build
         continue-on-error: true
@@ -377,7 +384,8 @@ jobs:
             rm test/widget_test.dart
           fi
           if [ -d test ] && ls test/*.dart >/dev/null 2>&1; then
-            flutter test
+            set -o pipefail
+            flutter test 2>&1 | tee test.txt
           else
             echo "Không có file test nào trong test/ - bỏ qua."
           fi
@@ -391,6 +399,25 @@ jobs:
       # --release ở bước dưới). Cần đúng 1 file proguard-rules.pro tối thiểu
       # (rỗng là hợp lệ, Flutter/AGP tự có rule mặc định riêng cho Flutter
       # Embedding) để R8 không xoá nhầm code Flutter Engine gọi qua JNI.
+      - name: Tóm tắt test Flutter (tên test hỏng + lý do, hiện ở Annotations và trang tóm tắt)
+        if: always()
+        # MỚI (mục 66) - trước đây test hỏng chỉ hiện "Process completed with exit code 1." không nói test nào/vì sao.
+        run: |
+          if [ -f test.txt ] && grep -qE "\[E\]|Some tests failed" test.txt; then
+            N=$(grep -cE "\[E\]" test.txt || true)
+            FIRST=$(grep -E -A2 "\[E\]" test.txt | grep -vE "^--$" | head -12 | sed -E 's/^[[:space:]]*//' | cut -c1-200 | paste -sd '|' - || true)
+            echo "::error title=flutter test: ${N} test HỎNG (APK vẫn build được)::${FIRST}"
+            {
+              echo "### flutter test - các test HỎNG"
+              echo '```'
+              grep -E -A6 "\[E\]" test.txt | head -80
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          elif [ -f test.txt ]; then
+            echo "### flutter test - tất cả test đạt" >> "$GITHUB_STEP_SUMMARY"
+            tail -n 2 test.txt >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Bật R8 full-mode shrinker (giảm dung lượng APK release)
         run: |
           echo "android.enableR8.fullMode=true" >> android/gradle.properties
