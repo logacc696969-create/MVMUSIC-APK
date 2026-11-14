@@ -350,6 +350,12 @@ jobs:
         run: |
           # MỚI (mục 35): ghi kết quả ra analyze.txt để bước kế tiếp đưa các dòng LỖI lên trang tóm tắt của lần build
           # (Dart của dự án chưa từng được biên dịch ở môi trường viết code - đây là chỗ đầu tiên lỗi biên dịch lộ ra).
+          # MỚI (mục 67) - xoá test/widget_test.dart MẪU do `flutter create` tự thêm (đếm số demo, gọi `MyApp`) TRƯỚC khi phân tích. Trước đây tệp này chỉ bị xoá ở bước test
+          # (sau bước này) nên analyze luôn báo 1 LỖI giả "The name 'MyApp' isn't a class" ở test/widget_test.dart:16 và bước đỏ "exit code 1" dù APK build được.
+          # Chỉ xoá nếu ĐÚNG là tệp mẫu (có chữ MyApp); test do dự án tự viết không bị đụng.
+          if [ -f test/widget_test.dart ] && grep -q "MyApp" test/widget_test.dart; then
+            rm test/widget_test.dart
+          fi
           set -o pipefail
           flutter analyze --no-fatal-infos --no-fatal-warnings 2>&1 | tee analyze.txt
 
